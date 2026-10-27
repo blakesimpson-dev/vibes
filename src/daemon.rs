@@ -12,7 +12,8 @@ use core_graphics::event::{
     CGEvent, CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventType, CallbackResult,
     EventField,
 };
-use rodio::{DeviceSinkBuilder, MixerDeviceSink, Source};
+use rodio::cpal::BufferSize;
+use rodio::{DeviceSinkBuilder, DeviceSinkError, MixerDeviceSink, Source};
 use std::cell::RefCell;
 use std::ffi::c_void;
 use std::fs;
@@ -22,8 +23,12 @@ use std::time::{Duration, Instant, SystemTime};
 /// How often the state file is checked.
 const POLL_SECS: f64 = 0.5;
 /// An open output keeps CoreAudio busy, so it's closed after this long without a sound. This
-/// also moves to a new default output (headphones) on the next key.
-const IDLE: Duration = Duration::from_secs(30);
+/// also moves to a new default output (headphones) on the next key. Reopening it delays that
+/// key's sound by tens of milliseconds, so this outlasts a pause in typing.
+const IDLE: Duration = Duration::from_secs(300);
+/// Frames per audio buffer: about 5ms at 48kHz. A sound can only start in the next buffer, so this
+/// sets most of the delay between a key and its sound (rodio's default aims for 50ms).
+const BUFFER_FRAMES: u32 = 256;
 const CAPS_LOCK: u16 = 0x39;
 
 #[link(name = "CoreGraphics", kind = "framework")]
@@ -112,7 +117,7 @@ impl Engine {
         let Some(sound) = sound else { return };
 
         if self.output.is_none() {
-            match DeviceSinkBuilder::open_default_sink() {
+            match open_output() {
                 Ok(mut output) => {
                     output.log_on_drop(false);
                     self.output = Some(output);
@@ -129,6 +134,13 @@ impl Engine {
         }
         self.last_sound = Some(Instant::now());
     }
+}
+
+/// The default output with a small buffer, or failing that with rodio's defaults.
+fn open_output() -> Result<MixerDeviceSink, DeviceSinkError> {
+    DeviceSinkBuilder::from_default_device()
+        .and_then(|builder| builder.with_buffer_size(BufferSize::Fixed(BUFFER_FRAMES)).open_stream())
+        .or_else(|_| DeviceSinkBuilder::open_default_sink())
 }
 
 extern "C" fn on_timer(_: CFRunLoopTimerRef, _: *mut c_void) {
